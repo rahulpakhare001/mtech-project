@@ -128,15 +128,6 @@ void update_sampler(uint32_t cpu, uint32_t s_idx, uint64_t address, uint64_t ip,
             if (SHCT[cpu][SHCT_idx].counter > 0)
                 SHCT[cpu][SHCT_idx].counter--;
 
-           /* if (type == LOAD_TRANSLATION){
-               int count = TRANSLATION_EXTRA_DEC;
-               while (count > 0 && SHCT[cpu][SHCT_idx].counter > 0){
-                 SHCT[cpu][SHCT_idx].counter--;
-                 count--;
-               }
-            }*/
-
-
             /*
             if (draw_transition)
                 printf("cycle: %lu SHCT: %d ip: 0x%llX SAMPLER_HIT cl_addr: 0x%llX page: 0x%llX block: %ld set: %d\n",
@@ -268,12 +259,6 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
         // sanity check
         if (SHCT_idx >= SHCT_PRIME)
             assert(0);
-
-	     /*if (type == LOAD_TRANSLATION){
-           rrpv[set][way] = LLC_TRANSLATION_INSERTION_RRPV;
-        }else{
-           rrpv[set][way] = LLC_DATA_INSERTION_RRPV;
-        }*/
 
         rrpv[set][way] = maxRRPV-1;
         if (SHCT[cpu][SHCT_idx].counter == SHCT_MAX)

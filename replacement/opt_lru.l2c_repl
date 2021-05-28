@@ -122,55 +122,6 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set,
       }
       block[set][way].lru = 0; // promote to the MRU position
 
-
-/*    if (type == LOAD_TRANSLATION) {
-      for (uint32_t i = 0; i < NUM_WAY; i++) {
-        if (block[set][i].lru < block[set][way].lru) {
-          block[set][i].lru++;
-        }
-      }
-      block[set][way].lru = 0; // promote to the MRU position
-    }else {
-      if (block[set][way].lru != 0) {
-        for (uint32_t i = 0; i < NUM_WAY; i++) {
-          if (block[set][i].lru == (block[set][way].lru - 1)) {
-             block[set][i].lru++;
-             break;
-          }
-        }
-        block[set][way].lru--; // promote by one position
-      }
-    }
-
-
-    if (type == LOAD_TRANSLATION) {
-      for (uint32_t i = 0; i < NUM_WAY; i++) {
-        if (block[set][i].lru < block[set][way].lru) {
-          block[set][i].lru++;
-        }
-      }
-      block[set][way].lru = 0; // promote to the MRU position
-    }else {
-
-      uint32_t hp = 0;
-      while(hp < HIT_PROMOTION){
-
-        if (block[set][way].lru != 0) {
-          for (uint32_t i = 0; i < NUM_WAY; i++) {
-            if (block[set][i].lru == (block[set][way].lru - 1)) {
-               block[set][i].lru++;
-               break;
-            }
-          }
-          block[set][way].lru--; // promote by one position
-        }
-
-        hp++;
-      }
-    }
-*/
-
-
   }else {
     // Insertion
 
