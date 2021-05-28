@@ -1,11 +1,12 @@
 <p align="center">
   <h1 align="center"> ChampSim </h1>
-  <p> ChampSim is easy to modify and a new replacement policy, branch predictor or prefetcher can be added to the existing codebase. We are using ChampSim for single-core simulation however it can also be used for multicore workloads. It takes application traces as input which can be generated using PIN tool.  We have enhanced original ChampSim available at repository(https://github.com/ChampSim/ChampSim).
+  <p> ChampSim is a trace-based simulator for a microarchitecture study. It is easy to modify and a new replacement policy, branch predictor or prefetcher can be added to the existing codebase. We are using ChampSim for single-core simulation however it can also be used for multicore workloads. It takes application traces as input which can be generated using PIN tool.  Our group has enhanced the original ChampSim available at repository(https://github.com/ChampSim/ChampSim).
   The enhancements as follows: <br>
-  A 5-level page table and a page table walker. <br>
-  The L1I and L1D cache are changed from physically indexed physically tagged (PIPT) cache to virtually indexed physically tagged (VIPT) cache. <br>
-  MMU caches also called Paging-Structure Caches (PSC), one each to store page table entries from page table levels 5 to 2. <br>
-  Modified the simulator to support simultaneous multithreading (SMT) and use it to simulate two threads on a single core. <br>
+  Markup :
+          1. A 5-level Page Table and a Page Table Walker.
+          2. VIPT L1I and L1D Cache.
+          3. Paging-Structure Caches.
+          4. Support for SMT (simultaneous multithreading).
   <p>
 </p>
 
