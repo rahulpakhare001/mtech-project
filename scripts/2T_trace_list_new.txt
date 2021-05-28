@@ -1,0 +1,15 @@
+605.mcf_s-1644B.champsimtrace.xz cc_sv.input-uk-2002.champsim.gz
+PageRank_1B.trace.gz cc_sv.input-uk-2002.champsim.gz
+605.mcf_s-1644B.champsimtrace.xz PageRank_1B.trace.gz
+PageRank_1B.trace.gz canneal_44B.trace.gz
+PageRank_1B.trace.gz Radii_100B.trace.gz
+PageRank_1B.trace.gz BellmanFord_94B.trace.gz
+605.mcf_s-1644B.champsimtrace.xz MIS_85B.trace.gz
+605.mcf_s-1644B.champsimtrace.xz canneal_44B.trace.gz
+canneal_44B.trace.gz Triangle_70B.trace.gz
+canneal_44B.trace.gz 620.omnetpp_s-141B.champsimtrace.xz
+623.xalancbmk_s-10B.champsimtrace.xz cc_sv.input-uk-2002.champsim.gz
+623.xalancbmk_s-10B.champsimtrace.xz Triangle_70B.trace.gz
+623.xalancbmk_s-10B.champsimtrace.xz 620.omnetpp_s-141B.champsimtrace.xz
+BFS_61B.trace.gz BellmanFord_94B.trace.gz
+620.omnetpp_s-141B.champsimtrace.xz BFS_61B.trace.gz

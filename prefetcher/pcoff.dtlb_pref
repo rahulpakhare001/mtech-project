@@ -1,0 +1,371 @@
+
+// @Vasudha: BINGO PC-offset for DTLB
+
+#include "champsim.h"
+#include "ooo_cpu.h"
+#include "cache.h"
+
+#include <map>
+#include <set>
+
+//#define N_DEBUG               //Neelu: Couts for debugging.
+
+//Neelu: PC Offset: Declaring structures for learning and including conditions for criticality. Turn knobs off according to requirement.
+#define PCOFFSET_LEARNING
+#ifdef PCOFFSET_LEARNING
+#define CRITICAL_IP_BASED_DECISIONS     //Neelu: If defined, only critical ips' training will be frozen, else, all.
+//#define DTLB_EVICTION_BASED_REGION_TRAINING     //Neelu: If defined, training will freeze on dtlb eviction, else cache block eviction.
+#endif
+
+#ifdef PCOFFSET_LEARNING
+
+#define NUM_OF_PAGES_IN_PC_OFFSET_REGION 8
+#define NUM_OF_PC_OFFSET_TABLE_SETS 1024
+#define NUM_OF_PC_OFFSET_TABLE_INDEX_BITS 10
+#define NUM_OF_PC_OFFSET_TABLE_WAYS 32
+#define NUM_OF_PC_BITS 16
+#define NUM_OF_OFFSET_BITS (knob_cloudsuite ? 12 : 3)
+#define LOG2_PC_OFFSET_REGION_SIZE (knob_cloudsuite ? 12 : 3)
+
+struct PC_Offset_Training
+{
+#ifdef CRITICAL_IP_BASED_DECISIONS
+        uint8_t critical_ip_flag;
+#endif
+        uint8_t bit_vector[NUM_OF_PAGES_IN_PC_OFFSET_REGION];
+        uint64_t first_ip;
+        uint64_t first_offset;
+	uint16_t thread_ID;	//@Vasudha: SMT compatible prefetcher
+};      //struct PC_Offset_Training ending.
+
+map<uint64_t, struct PC_Offset_Training> pc_offset_training[NUM_CPUS];  //Neelu: Stores region as key.
+
+//Neelu: PC Offset: Including hashing function.
+uint64_t hash_index(uint64_t key, int index_len) {
+    if (index_len == 0)
+        return key;
+    for (uint64_t tag = (key >> index_len); tag > 0; tag >>= index_len)
+        key ^= tag & ((1 << index_len) - 1);
+    return key;
+}
+
+class PC_Offset_Trained_Table
+{
+public:
+        uint64_t tag;
+        uint32_t lru;
+        uint8_t bit_vector[NUM_OF_PAGES_IN_PC_OFFSET_REGION];
+        uint8_t valid;
+	uint16_t thread_ID;	//@Vasudha: SMT compatible prefetcher
+        PC_Offset_Trained_Table()
+        {
+                //Neelu: Lru will get initialized in prefetcher_initialized function.
+                tag = 0;
+                valid = 0;
+                for(int i = 0; i < NUM_OF_PAGES_IN_PC_OFFSET_REGION; i++)
+                        bit_vector[i] = 0;
+        }
+
+
+};      //PC_Offset_Trained_Table class ending.
+
+
+PC_Offset_Trained_Table pc_offset_trained_table[NUM_CPUS][NUM_OF_PC_OFFSET_TABLE_SETS][NUM_OF_PC_OFFSET_TABLE_WAYS];
+
+//Stats
+uint64_t pcoff_prefetches_made[NUM_CPUS] = {0}, pcoff_prefetches_dropped[NUM_CPUS] = {0}, num_pcoff_training_regions[NUM_CPUS] = {0}, num_pcoff_trained_regions[NUM_CPUS] = {0}, num_pcoff_trained_regions_conflicts[NUM_CPUS][NUM_OF_PC_OFFSET_TABLE_SETS] = {0};
+
+#ifdef CRITICAL_IP_BASED_DECISIONS
+set<uint64_t> pref_critical_ips[NUM_CPUS];
+#endif
+
+#endif  //ifdef PCOFFSET_LEARNING ending
+
+void CACHE::dtlb_prefetcher_initialize()
+{
+#ifdef PCOFFSET_LEARNING
+        for(int i = 0; i < NUM_OF_PC_OFFSET_TABLE_SETS; i++)
+                for(int j = 0; j < NUM_OF_PC_OFFSET_TABLE_WAYS; j++)
+                        pc_offset_trained_table[cpu][i][j].lru = j;
+#endif //ifdef PCOFFSET_LEARNING ending.
+}
+
+void CACHE::dtlb_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type,  uint64_t prefetch_id, uint8_t instruction, uint8_t critical_ip_flag)
+{
+
+	#ifdef CRITICAL_IP_BASED_DECISIONS
+		if(critical_ip_flag)
+		{
+			pref_critical_ips[cpu].insert(ip);
+		}
+	#endif
+
+	#ifdef PCOFFSET_LEARNING
+	//Neelu: PC Offset: Steps:
+	//Step 1 - Check if region is already trained, if yes, then prefetch, if no, step 2.
+	//Step 2 - Check if region is already in training, if yes, set bit vector and check for setting criticality flag, if not, step 3.
+	//Step 3 - Insert into training.
+ 
+	//cout << "Cycle: " <<dec<< current_core_cycle[0] <<  " DEMAND PAGE REQ: " << hex << addr << " IP " << ip << " HIT: " << (uint16_t)cache_hit << endl;
+	uint64_t offset = (addr) & ((1 << NUM_OF_OFFSET_BITS)-1);
+	uint16_t thread_ID = ((1 << LOG2_THREADS) - 1) & prefetch_id;
+	
+        //indexing = PC+address  
+	uint64_t pcoff_index = hash_index(((ip & ((1 << NUM_OF_PC_BITS)-1)) << NUM_OF_OFFSET_BITS) | offset, NUM_OF_PC_OFFSET_TABLE_INDEX_BITS);
+        //indexing = PC 	
+	//uint64_t pcoff_index = hash_index(((ip & ((1 << NUM_OF_PC_BITS)-1))), NUM_OF_PC_OFFSET_TABLE_INDEX_BITS);
+        uint64_t pcoff_region = addr >> LOG2_PC_OFFSET_REGION_SIZE;
+        
+	uint64_t base = addr >> NUM_OF_OFFSET_BITS;
+	//TAG = PC-address
+	uint64_t pcoff_tag = base << (NUM_OF_PC_BITS + NUM_OF_OFFSET_BITS) | pcoff_index;
+	//TAG = PC_OFFSET	
+	//uint64_t pcoff_tag = pcoff_index >> NUM_OF_PC_OFFSET_TABLE_INDEX_BITS;
+        pcoff_index &= ((1 << NUM_OF_PC_OFFSET_TABLE_INDEX_BITS)-1);
+        //cout << "pcoff_region: " << hex << pcoff_region << "pcoff_tag = " << pcoff_tag << " set(pcoff_index) " <<  dec <<pcoff_index ;
+	int pcoff_way;
+	for(pcoff_way = 0; pcoff_way < NUM_OF_PC_OFFSET_TABLE_WAYS; pcoff_way++)
+	{
+		
+		if (pc_offset_trained_table[cpu][pcoff_index][pcoff_way].tag == pcoff_tag && 
+		    pc_offset_trained_table[cpu][pcoff_index][pcoff_way].valid            && 
+	 	    (knob_cloudsuite || pc_offset_trained_table[cpu][pcoff_index][pcoff_way].thread_ID == thread_ID))
+		{
+		//cout << "pcoff_way : " << pcoff_way << " bit_vector: " ;
+			//Hit so update lru
+			for(int i = 0; i < NUM_OF_PC_OFFSET_TABLE_WAYS; i++)
+				if(pc_offset_trained_table[cpu][pcoff_index][i].lru < pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru)
+					pc_offset_trained_table[cpu][pcoff_index][i].lru++;
+
+			pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru = 0;
+
+			for(int i = 0; i < NUM_OF_PAGES_IN_PC_OFFSET_REGION; i++)
+			{
+				//cout << (uint16_t)pc_offset_trained_table[cpu][pcoff_index][pcoff_way].bit_vector[i] << " " ;
+				if(pc_offset_trained_table[cpu][pcoff_index][pcoff_way].bit_vector[i])
+				{
+					if(warmup_complete[cpu][thread_ID])
+						pcoff_prefetches_made[cpu]++;
+
+					if(knob_cloudsuite)
+					{
+						uint8_t asid = addr & ((1 << 9) - 1); 
+						if(!prefetch_translation(ip, (((pcoff_region << NUM_OF_OFFSET_BITS) | (i << 9)) | asid), FILL_DTLB, 0, prefetch_id, instruction ))
+						if(warmup_complete[cpu][thread_ID])
+							pcoff_prefetches_dropped[cpu]++;
+						//cout <<"\nCycle: "<< dec << current_core_cycle[0]<<hex << " PREFETCH " <<  (((pcoff_region << NUM_OF_OFFSET_BITS) | (i << 9)) | asid) << " IP: " << ip << endl;
+					}
+					else
+					{
+						if(!prefetch_translation(ip, ((pcoff_region << NUM_OF_OFFSET_BITS) | i), FILL_DTLB, 0, prefetch_id, instruction ))
+						if(warmup_complete[cpu][thread_ID])
+							pcoff_prefetches_dropped[cpu]++;
+					}
+				} 
+			}
+			//cout << endl;
+			//for dynamic training, update bit vector in training region for cache misses
+			if ( cache_hit == 0)
+			{
+				if (knob_cloudsuite)
+					pc_offset_training[cpu][pcoff_region].bit_vector[offset >> 9] = 1;	 
+				else
+					pc_offset_training[cpu][pcoff_region].bit_vector[offset] = 1;
+			}
+			break;  //break if match found.
+		} 
+	}  
+
+	//Train only in case of cache miss
+	if(pcoff_way == NUM_OF_PC_OFFSET_TABLE_WAYS && cache_hit == 0)
+	{
+		#ifdef N_DEBUG
+			cout << "Region " << pcoff_region << " Not found in Trained Table. " << endl;
+		#endif
+		if(pc_offset_training[cpu].find(pcoff_region) != pc_offset_training[cpu].end() && (knob_cloudsuite || pc_offset_training[cpu][pcoff_region].thread_ID == thread_ID))
+		{
+			#ifdef N_DEBUG
+				cout << " Region is in training. " << endl;
+			#endif
+
+			//cout << endl << "Region in training : " << (offset >> 9 ) << endl;
+			if (knob_cloudsuite)
+				pc_offset_training[cpu][pcoff_region].bit_vector[offset >> 9] = 1;
+			else
+				pc_offset_training[cpu][pcoff_region].bit_vector[offset] = 1;
+	#ifdef CRITICAL_IP_BASED_DECISIONS
+			if(pref_critical_ips[cpu].find(ip) != pref_critical_ips[cpu].end())
+				pc_offset_training[cpu][pcoff_region].critical_ip_flag = 1;
+	#endif
+
+		} //if found in training ending.
+		else
+		{
+			#ifdef N_DEBUG
+				cout << " Region is not in training, creating a new entry. " << endl;
+			#endif
+
+			//not found in training.
+			struct PC_Offset_Training new_pcoff_trainer;
+			new_pcoff_trainer.first_offset = offset;
+			new_pcoff_trainer.first_ip = ip;
+			new_pcoff_trainer.thread_ID = thread_ID;
+			for(int i = 0; i < NUM_OF_PAGES_IN_PC_OFFSET_REGION; i++)
+				new_pcoff_trainer.bit_vector[i] = 0;
+	#ifdef CRITICAL_IP_BASED_DECISIONS
+			new_pcoff_trainer.critical_ip_flag = 0;
+	#endif
+
+			pc_offset_training[cpu].insert(pair<int64_t, struct PC_Offset_Training>(pcoff_region, new_pcoff_trainer));
+			if (knob_cloudsuite)
+				pc_offset_training[cpu][pcoff_region].bit_vector[offset >> 9] = 1;
+			else
+				pc_offset_training[cpu][pcoff_region].bit_vector[offset] = 1;
+
+			if(num_pcoff_training_regions[cpu] < pc_offset_training[cpu].size())
+				num_pcoff_training_regions[cpu] = pc_offset_training[cpu].size();
+
+			#ifdef N_DEBUG
+				cout << "Trainer Map Size: " << num_pcoff_training_regions[cpu] << endl;
+			#endif
+
+		}
+	} //if pcoff_way is max ending.
+
+	#endif  //ifdef PCOFFSET_LEARNING ending.
+
+	return;
+}
+
+void CACHE::dtlb_prefetcher_cache_fill( uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in, uint16_t thread_ID)
+{
+	//@Vasudha: As the blocks start getting evicted, transfer region history from traning to trained table
+	//Step 1: Find entry from training table
+	//Step 2: Insert entry to trained table
+	//Step 3: Invalidate corresponding entry from training table
+        
+	//cout <<"Cycle: "<<dec<<current_core_cycle[0]<< " EVICTED PAGE : " <<hex<< (evicted_addr) << " LOAD PAGE : "<< (addr) << endl;
+	uint64_t pcoff_region = evicted_addr >> LOG2_PC_OFFSET_REGION_SIZE;
+        int pcoff_way;
+
+	//cout << hex <<"pcoff_region : " << pcoff_region ;
+	auto it = pc_offset_training[cpu].find(pcoff_region);
+	if(it != pc_offset_training[cpu].end() && (knob_cloudsuite || pc_offset_training[cpu][pcoff_region].thread_ID == thread_ID))
+	{
+		#ifdef N_DEBUG
+		     cout << " Region is transferred from training to trained table. " << endl;
+		#endif
+
+		#ifdef CRITICAL_IP_BASED_DECISIONS
+			if (pc_offset_training[cpu][pcoff_region].critical_ip_flag != 1)
+				return;
+		#endif
+		//Insert into trained table
+		//indexing = PC+address
+		uint64_t pcoff_index = hash_index(((pc_offset_training[cpu][pcoff_region].first_ip & ((1 << NUM_OF_PC_BITS)-1)) << NUM_OF_OFFSET_BITS) | pc_offset_training[cpu][pcoff_region].first_offset, NUM_OF_PC_OFFSET_TABLE_INDEX_BITS);
+		//indexing = PC		
+		//uint64_t pcoff_index = hash_index(((pc_offset_training[cpu][pcoff_region].first_ip & ((1 << NUM_OF_PC_BITS)-1))), NUM_OF_PC_OFFSET_TABLE_INDEX_BITS);
+		uint64_t base = addr >> NUM_OF_OFFSET_BITS;
+		//TAG = PC_ADDRESS  
+		uint64_t pcoff_tag = base << (NUM_OF_PC_BITS + NUM_OF_OFFSET_BITS) | pcoff_index;
+		//TAG = PC_OFFSET	
+		//uint64_t pcoff_tag = pcoff_index >> NUM_OF_PC_OFFSET_TABLE_INDEX_BITS;
+		pcoff_index &= ((1 << NUM_OF_PC_OFFSET_TABLE_INDEX_BITS)-1);
+
+		//cout << hex <<  " pcoff_tag : " << pcoff_tag << " pcoff_index : "<< dec << pcoff_index << endl;
+		//check if entry is already present in trained table
+		for (pcoff_way = 0; pcoff_way < NUM_OF_PC_OFFSET_TABLE_WAYS; pcoff_way++)
+		{
+			if (pc_offset_trained_table[cpu][pcoff_index][pcoff_way].valid == 1 &&
+			    pc_offset_trained_table[cpu][pcoff_index][pcoff_way].tag == pcoff_tag && 
+			    (knob_cloudsuite || pc_offset_trained_table[cpu][pcoff_index][pcoff_way].thread_ID == thread_ID))
+			{	
+			//cout << "pcoff_way: "  << pcoff_way << " bit_vector : " ;
+				//HIT in trained table
+			 	//dynamic training -> AND					
+				for(int page=0; page < NUM_OF_PAGES_IN_PC_OFFSET_REGION; page++)
+				{
+					//cout << (uint16_t)pc_offset_trained_table[cpu][pcoff_index][pcoff_way].bit_vector[page] << " " ;
+					pc_offset_trained_table[cpu][pcoff_index][pcoff_way].bit_vector[page] &= pc_offset_training[cpu][pcoff_region].bit_vector[page];
+				}
+				//cout << endl;
+				for(int i = 0; i < NUM_OF_PC_OFFSET_TABLE_WAYS; i++)
+					if(pc_offset_trained_table[cpu][pcoff_index][i].lru < pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru)
+						pc_offset_trained_table[cpu][pcoff_index][i].lru++;
+				pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru = 0;
+				return; //once updated, return
+			}
+		}
+
+		for(pcoff_way = 0; pcoff_way < NUM_OF_PC_OFFSET_TABLE_WAYS; pcoff_way++)
+		{
+			if(pc_offset_trained_table[cpu][pcoff_index][pcoff_way].valid == 0)
+			{
+				pc_offset_trained_table[cpu][pcoff_index][pcoff_way].valid = 1;
+				for(int page=0; page < NUM_OF_PAGES_IN_PC_OFFSET_REGION; page++)
+					pc_offset_trained_table[cpu][pcoff_index][pcoff_way].bit_vector[page] = pc_offset_training[cpu][pcoff_region].bit_vector[page];
+				pc_offset_trained_table[cpu][pcoff_index][pcoff_way].tag = pcoff_tag;
+				for(int i = 0; i < NUM_OF_PC_OFFSET_TABLE_WAYS; i++)
+					if(pc_offset_trained_table[cpu][pcoff_index][i].lru < pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru)
+						pc_offset_trained_table[cpu][pcoff_index][i].lru++;
+				pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru = 0;
+				pc_offset_trained_table[cpu][pcoff_index][pcoff_way].thread_ID = thread_ID;
+			}
+		}
+		if (pcoff_way == NUM_OF_PC_OFFSET_TABLE_WAYS)
+		{
+			//Find victim way
+			int victim_way;
+			for( pcoff_way = 0; pcoff_way < NUM_OF_PC_OFFSET_TABLE_WAYS; pcoff_way++ )
+			{
+				if( pc_offset_trained_table[cpu][pcoff_index][pcoff_way].lru == NUM_OF_PC_OFFSET_TABLE_WAYS - 1 )
+				{
+					victim_way = pcoff_way;
+					break;
+				}
+			}
+			if(victim_way == NUM_OF_PC_OFFSET_TABLE_WAYS)
+			{
+				cout << " Unable to find victim way in PC_OFFSET trained table " << endl;
+				assert(0);
+			}
+			assert(pc_offset_trained_table[cpu][pcoff_index][victim_way].valid == 1);
+			if(warmup_complete[cpu][thread_ID])
+				num_pcoff_trained_regions_conflicts[cpu][pcoff_index]++;
+			for( int page=0; page < NUM_OF_PAGES_IN_PC_OFFSET_REGION; page++)
+			{
+				//cout << (uint16_t) pc_offset_trained_table[cpu][pcoff_index][victim_way].bit_vector[page] << " " ;
+				pc_offset_trained_table[cpu][pcoff_index][victim_way].bit_vector[page] = pc_offset_training[cpu][pcoff_region].bit_vector[page];
+			}
+			//cout <<  endl;
+			pc_offset_trained_table[cpu][pcoff_index][victim_way].tag = pcoff_tag;
+			for(int i = 0; i < NUM_OF_PC_OFFSET_TABLE_WAYS; i++)
+				if(pc_offset_trained_table[cpu][pcoff_index][i].lru < pc_offset_trained_table[cpu][pcoff_index][victim_way].lru)
+					pc_offset_trained_table[cpu][pcoff_index][i].lru++;
+			pc_offset_trained_table[cpu][pcoff_index][victim_way].lru = 0;
+			pc_offset_trained_table[cpu][pcoff_index][victim_way].thread_ID = thread_ID;
+		}
+		//for dynamic training reset bit-vector of training region
+		for( int page = 0; page < NUM_OF_PAGES_IN_PC_OFFSET_REGION; page++)
+			pc_offset_training[cpu][pcoff_region].bit_vector[page] = 0;
+	}
+	//else cout << pcoff_region << endl;
+	
+}
+
+void CACHE::dtlb_prefetcher_final_stats()
+{
+	cout << "CPU " << cpu << " DTLB PC_OFFSET prefetcher final stats" << endl;	
+	cout << "Number of prefetches requested - " << pcoff_prefetches_made[cpu] << endl;
+	cout << "Number of prefetches dropped - " << pcoff_prefetches_dropped[cpu] << endl;
+	cout << "Number of PC-Offset training regions - " << num_pcoff_training_regions[cpu] << endl;
+	cout << "Trainer Map Size: " << num_pcoff_training_regions[cpu] << endl;
+	int sum = 0;
+	for(int i=0; i<NUM_OF_PC_OFFSET_TABLE_SETS; i++)
+	{
+		cout << "TRAINED TABLE SET: " << i << " conflicts: " << num_pcoff_trained_regions_conflicts[cpu][i] << endl;
+		sum = sum + num_pcoff_trained_regions_conflicts[cpu][i];
+	}	
+	cout << "Number of PC-Offset trained regions conflict - " << sum << endl;
+
+}

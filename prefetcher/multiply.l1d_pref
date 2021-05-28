@@ -1,0 +1,216 @@
+#include "cache.h"
+
+#include <map>
+
+//#define TRACE_DUMP		//Neelu: Addition Trace Dump prints
+
+map<uint64_t, uint64_t> last_accessed_address;	//Neelu: Stores last accessed address per IP.  
+
+#define NUM_OF_IP_TABLE_ENTRIES 1024
+#define NUM_OF_IP_TAG_BITS 6
+#define NUM_OF_IP_INDEX_BITS 10
+#define PREFETCH_DEGREE 4
+
+class IP_TABLE
+{
+public:
+	uint16_t ip_tag;
+	uint64_t last_page;
+	uint64_t last_offset;	
+	int64_t last_stride;
+	int64_t constant_stride;
+	uint64_t cs_confidence;		//confidence for constant stride
+	uint64_t ls_confidence;		//last stride confidence
+	uint16_t ip_valid;
+	uint64_t constant_multiplication_factor;
+	uint64_t cmf_confidence;
+	uint64_t cmf_modulo; 		//prefetch modulo-1, modulo, modulo+1 strides
+	uint64_t last_multiplication_factor;
+	uint64_t lmf_confidence;
+	uint64_t lmf_modulo;	
+
+
+	IP_TABLE()
+	{
+		ip_tag = 0;
+		last_page = 0;
+		last_offset = 0;
+		last_stride = 0;
+		constant_stride = 0;
+		cs_confidence = 0;
+		ls_confidence = 0;
+		ip_valid = 0;
+		constant_multiplication_factor = 0;
+		cmf_confidence = 0;
+		cmf_modulo = 0;
+		last_multiplication_factor = 0;
+                lmf_confidence = 0;
+                lmf_modulo = 0;
+
+	}
+};
+
+IP_TABLE trackers_l1[NUM_OF_IP_TABLE_ENTRIES];
+
+void CACHE::l1d_prefetcher_initialize() 
+{
+	
+
+
+}
+
+void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type)
+{
+
+	#ifdef TRACE_DUMP
+	cout << "DEMAND:  IP: " << ip << "  CL Addr: " << (addr >> LOG2_BLOCK_SIZE) << "  Hit: " << unsigned(cache_hit) << "  Cycle: " << current_core_cycle[cpu] <<endl;
+	#endif
+
+	if(last_accessed_address.find(ip) != last_accessed_address.end())
+	{
+		#ifdef TRACE_DUMP
+		cout << "IP: "<< ip << "  Stride: " << ((addr >> LOG2_BLOCK_SIZE) - last_accessed_address[ip]) << endl;
+		#endif
+	}
+	
+	last_accessed_address[ip] = addr; 
+
+
+	uint16_t ip_tag = (ip >> NUM_OF_IP_INDEX_BITS) & ((1 << NUM_OF_IP_TAG_BITS));
+	uint64_t index = ip & ((1 << NUM_OF_IP_INDEX_BITS)-1);
+	uint64_t curr_page = addr >> LOG2_PAGE_SIZE;
+	uint64_t curr_offset = addr >> LOG2_BLOCK_SIZE;
+
+	if(trackers_l1[index].ip_tag != ip_tag)
+	{
+		if(trackers_l1[index].ip_valid == 1)
+		{
+			trackers_l1[index].ip_valid = 0;
+		}
+		else
+		{
+			trackers_l1[index].ip_tag = ip_tag;
+			trackers_l1[index].last_page = curr_page;
+			trackers_l1[index].last_offset = curr_offset;
+			trackers_l1[index].last_stride = 0;
+			trackers_l1[index].constant_stride = 0;
+			trackers_l1[index].cs_confidence = 0;
+			trackers_l1[index].ls_confidence = 0;
+			trackers_l1[index].ip_valid = 1;
+			trackers_l1[index].constant_multiplication_factor = 0;
+			trackers_l1[index].cmf_confidence = 0;
+			trackers_l1[index].cmf_modulo = 0;
+			trackers_l1[index].last_multiplication_factor = 0;
+                        trackers_l1[index].lmf_confidence = 0;
+                        trackers_l1[index].lmf_modulo = 0;
+		}
+		return;
+	}	
+	
+	trackers_l1[index].ip_valid = 1;
+	
+	int64_t	stride;
+
+	if(curr_offset >= trackers_l1[index].last_offset)
+		stride = curr_offset - trackers_l1[index].last_offset;
+	else
+		stride = -1*(trackers_l1[index].last_offset - curr_offset);
+
+	cout <<" IP: " <<ip << " Stride: " << stride << " Cycle: " << current_core_cycle[cpu] << endl;
+
+	if(stride == 0)
+		return;
+
+	int cs_flag = 0, mf_flag = 0;
+	if(stride == trackers_l1[index].last_stride)
+	{
+		trackers_l1[index].ls_confidence++;	
+		if(trackers_l1[index].ls_confidence > 3)
+			trackers_l1[index].ls_confidence = 3;
+
+		cs_flag = 1;
+		cout << " Last Stride: " << stride << " Confidence: " << trackers_l1[index].ls_confidence << endl;
+	}
+	
+	if(stride == trackers_l1[index].constant_stride)
+        {
+                trackers_l1[index].cs_confidence++;
+                if(trackers_l1[index].cs_confidence > 3)
+                        trackers_l1[index].cs_confidence = 3;
+
+		cs_flag = 2;
+                cout << " Constant Stride: " << stride << " Confidence: " << trackers_l1[index].cs_confidence << endl;
+        }     
+	
+	if(cs_flag == 0)
+	{
+		if((stride/trackers_l1[index].last_stride) == trackers_l1[index].last_multiplication_factor)
+		{
+			trackers_l1[index].lmf_confidence++;
+			if(trackers_l1[index].lmf_confidence > 3)
+				trackers_l1[index].lmf_confidence = 3;
+			mf_flag = 1;
+		}
+
+		cout << " LMF: " << trackers_l1[index].last_multiplication_factor << " Confidence: " << trackers_l1[index].lmf_confidence << endl;
+
+		if((stride%trackers_l1[index].last_stride) == trackers_l1[index].lmf_modulo)
+			cout << " Same as last modulo: " << (stride%trackers_l1[index].last_stride) << endl;
+		else
+			cout << " Difference in modulo: " << (stride%trackers_l1[index].last_stride)-trackers_l1[index].lmf_modulo << endl;
+
+	} 
+	
+	if(cs_flag == 0)
+        {
+                if((stride/trackers_l1[index].last_stride) == trackers_l1[index].constant_multiplication_factor)
+                {
+                        trackers_l1[index].cmf_confidence++;
+                        if(trackers_l1[index].cmf_confidence > 3)
+                                trackers_l1[index].cmf_confidence = 3;
+			mf_flag = 2;
+                }
+
+                cout << " CMF: " << trackers_l1[index].constant_multiplication_factor << " Confidence: " << trackers_l1[index].cmf_confidence << endl;
+
+                if((stride%trackers_l1[index].last_stride) == trackers_l1[index].cmf_modulo)
+                        cout << " Same as constant modulo: " << (stride%trackers_l1[index].last_stride) << endl;
+                else
+                        cout << " Difference in const modulo: " << (stride%trackers_l1[index].last_stride)-trackers_l1[index].cmf_modulo << endl;
+
+        }
+
+
+	if(trackers_l1[index].ls_confidence > 1)
+	{
+		trackers_l1[index].constant_stride = trackers_l1[index].last_stride;
+		trackers_l1[index].cs_confidence = trackers_l1[index].ls_confidence;
+	}
+	
+	if(trackers_l1[index].lmf_confidence > 1)
+	{
+		trackers_l1[index].constant_multiplication_factor = trackers_l1[index].last_multiplication_factor;
+		trackers_l1[index].cmf_confidence = trackers_l1[index].lmf_confidence;
+		trackers_l1[index].cmf_modulo = trackers_l1[index].lmf_modulo;
+	}	
+	
+	if(flag == 1)
+	{
+		trackers_l1[index].last_stride = stride;
+		
+	}
+}
+
+void CACHE::l1d_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+
+	#ifdef TRACE_DUMP
+	cout << "FILL:  CL Addr: " << (addr >> LOG2_BLOCK_SIZE) << "  Prefetch: " << unsigned(prefetch) << "  Cycle: " << current_core_cycle[cpu] <<endl;
+	#endif
+
+}
+
+void CACHE::l1d_prefetcher_final_stats()
+{
+
+}

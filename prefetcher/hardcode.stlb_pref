@@ -1,0 +1,415 @@
+#include "ooo_cpu.h"
+#include "cache.h"
+
+//#define DEBUG_PRINTS
+
+#ifdef DEBUG_PRINTS
+#define DEBUG(x) x
+#else
+#define DEBUG(x)
+#endif
+
+struct offset{
+	vector<uint16_t> off_bits;	// 12 bits offset, 2 bits useless prefetch, 1 bit counter 
+	uint64_t next_region;
+	uint64_t off_bits_max_size;	// to calculate storage overhead
+}; 
+
+struct metadata{
+	uint64_t last_trans;
+	map<uint64_t, struct offset> sequence;
+};
+
+map <uint64_t, struct metadata> perIP[NUM_CPUS][MAX_THREADS]; 
+
+uint64_t demand_translation = 0;	
+uint64_t pcoff_prefetches_made[NUM_CPUS] = {0}, pcoff_prefetches_dropped[NUM_CPUS] = {0};
+
+void CACHE::stlb_prefetcher_initialize() 
+{
+	
+}
+
+
+// TODO: store last demand request to current demand request in map
+// TODO: offset structure should store next region that will be accessed
+// TODO: off_bits should store a 2-bit counter for number of useless prefetch
+
+void CACHE::stlb_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint64_t prefetch_id, uint8_t instruction)
+{
+	int found_offset = 0;
+	uint16_t thread_ID = ((1 << LOG2_THREADS) - 1) & prefetch_id;
+	if (knob_cloudsuite)
+		thread_ID = 0;
+	uint8_t asid;
+	if (knob_cloudsuite)
+	{
+		asid = addr & 0xFF;
+		addr = addr >> 9;
+	}
+	
+	uint64_t region = addr >> 12; 	// 12 bits offset
+	uint16_t curr_off = addr & 0xFFF;
+	
+	// Check if this IP needs to be prefetched (those with STLB miss > 1000)
+	auto it = crit_ip_stlb_miss[cpu][thread_ID].find(ip);
+	if (it != crit_ip_stlb_miss[cpu][thread_ID].end() && (it->second) >= 1000 && cache_hit == 0 )
+	{
+		// start prefetching
+		auto search_ip = perIP[cpu][thread_ID].find(ip);
+		if (search_ip != perIP[cpu][thread_ID].end())
+		{
+			// Based upon addr, prefetch next translation
+			auto search_reg = (search_ip->second).sequence.find(region);
+			if (search_reg != (search_ip->second).sequence.end() && (search_reg->second).off_bits.size() > 0)
+			{
+				found_offset = 0;
+				// Region's sequence is present. Now search offset bits according to current addr and prefetch next address
+				vector<uint16_t>::iterator it = (search_reg->second).off_bits.begin();
+				//DEBUG(if(ip==94320733777782){
+				#ifdef DEBUG_PREF
+				cout << "Cycle: " << dec << current_core_cycle[cpu] << " IP: " << hex << ip << " Region: " << region << " off_bits.size - " ;
+				cout << dec << (search_reg->second).off_bits.size() << endl;//});
+				#endif
+				
+				for (it; it != (search_reg->second).off_bits.end(); it++) 
+				{
+					#ifdef DEBUG_PREF
+					cout << hex << ((*it)>>3) << dec <<  " "; 
+					#endif
+					if (((*it) >> 3) == curr_off) 
+					{
+						found_offset = 1;
+						// Prefetch next offset
+						if ((it+1) != (search_reg->second).off_bits.end())
+						{
+							// To prefetch, only if the number of useless prefetch < 3 and occurrence counter == 1
+							if ( (((*(it+1)) >> 1) & 0x3) < 3 && ((*(it+1)) & 0x1) == 1)
+							{
+								uint64_t pf_addr;
+								if (knob_cloudsuite)
+									pf_addr = (region << 12 | ((*(it+1)) >> 3)) << 9 | asid;
+								else
+									pf_addr = region << 12 | ((*(it+1)) >> 3);
+								if(warmup_complete[cpu][thread_ID])
+                                        				pcoff_prefetches_made[cpu]++;
+								if(!prefetch_translation(ip, pf_addr, FILL_STLB, ip, prefetch_id, instruction ))
+									if(warmup_complete[cpu][thread_ID])
+                                        					pcoff_prefetches_dropped[cpu]++;
+								
+								
+								break;
+							}
+							else if ( (((*(it+1)) >> 1) & 0x3) == 3)
+							{
+								// Useless prefetch == 3, delete that entry
+								(search_reg->second).off_bits.erase(it+1);
+								if ((search_reg->second).off_bits.size() == 0)
+									cout << "EMPTY VECTOR " << endl;
+								// TODO: Should I prefetch next offset ?????
+								break; 
+							}
+						}
+						else if ((search_reg->second).next_region != UINT64_MAX)
+						{
+							DEBUG(if(ip==94320733777782){
+							cout << "start prefetching next region: " << hex << (search_reg->second).next_region << dec;});
+							
+							// Prefetch first offset of next region
+							auto search_next_reg = (search_ip->second).sequence.find((search_reg->second).next_region);
+							if (search_next_reg != (search_ip->second).sequence.end() && (search_next_reg->second).off_bits.size() > 0)
+							{
+								// Count the number of useless prefetch
+								DEBUG(if(ip==94320733777782){
+								cout << " off_bits.size- " << (search_next_reg->second).off_bits.size() << " region: " << hex<<(search_next_reg->first)	<< endl;});
+								
+								if ( (((search_next_reg->second).off_bits[0] >> 1) & 0x3) < 3 && ((search_next_reg->second).off_bits[0] & 0x1) == 1)
+								{
+									uint64_t pf_addr;
+									if (knob_cloudsuite)
+										pf_addr = ((search_next_reg->first) << 12 | ((search_next_reg->second).off_bits[0] >> 3)) << 9 | asid;
+									else
+										pf_addr = (search_next_reg->first) << 12 | ((search_next_reg->second).off_bits[0] >> 3);
+								
+									if(warmup_complete[cpu][thread_ID])
+                                        					pcoff_prefetches_made[cpu]++;
+									if(!prefetch_translation(ip, pf_addr, FILL_STLB, ip, prefetch_id, instruction ))
+										if(warmup_complete[cpu][thread_ID])
+                                        	pcoff_prefetches_dropped[cpu]++;
+									
+									
+										break;
+								}
+								else if ((((search_next_reg->second).off_bits[0] >> 1) & 0x3) == 3)
+								{
+									// Useless prefetch == 3, delete that entry
+									vector<uint16_t>::iterator it = (search_next_reg->second).off_bits.begin();
+									(search_next_reg->second).off_bits.erase(it);
+									// TODO: Should I prefetch next offset ?????
+									break;
+								}
+							}
+							else
+								break;	
+						}
+					}
+				}
+				//if (found_offset == 0)
+				//{
+					// insert prev translation and curr translation pair
+					// 1. region of prev and curr are same, just insert offset bits after previous offset in vector
+					// 2. set next region for prev region map and entre offset in current region's map
+					//DEBUG(if(ip==94320733777782){
+					cout << "CURR OFF NOT FOUND, add prev-curr, prev_reg: " << hex <<((search_ip->second).last_trans>>12)<<" curr_reg: "<<region<<dec<< endl;//});
+					//#endif		
+					if (region == (search_ip->second).last_trans >> 12)
+					{
+						int found_prev_off = 0;
+						vector<uint16_t>::iterator it = (search_reg->second).off_bits.begin();
+						for (it; it != (search_reg->second).off_bits.end(); it++) 
+						{
+							if (((*it) >> 3) == ((search_ip->second).last_trans & 0xFFF))
+							{
+								found_prev_off = 1;
+
+								// If next offset in vector is curr_off, then set occurrence counter 
+								if ((it+1) != (search_reg->second).off_bits.end())
+								{ 
+									if (((*(it+1)) >> 3) == curr_off && ((*(it+1)) & 0x1) == 0)
+										(*(it+1)) = (*(it+1)) + 1;
+									else if (((*(it+1)) >> 3) != curr_off)
+									{
+										// If curr_off is present in vector,
+										// 		1) reset occurence of next offset of curr off
+										//		2) delete curr_offset
+										//		3) reset occurence of next offset of it
+										//		4) insert curr_off as next offset with occurence = 0
+										vector<uint16_t>::iterator iter = (search_reg->second).off_bits.begin();
+										for (iter; iter != (search_reg->second).off_bits.end(); iter++)
+										{
+											if (((*iter) >> 3) == curr_off)
+											{
+												if ((iter+1) != (search_reg->second).off_bits.end() && ((*(iter+1)) & 0x1) == 1)
+													(*(iter+1)) = (*(iter+1)) - 1;	// STEP 1 
+												(search_reg->second).off_bits.erase(iter);	// STEP 2
+												break;
+											}
+										}
+										
+										if (((*it) >> 3) == ((search_ip->second).last_trans & 0xFFF))
+										{
+											if (((*(it+1)) & 0x1) == 1)
+												(*(it+1)) = (*(it+1)) - 1;	// STEP 3
+
+											(search_reg->second).off_bits.insert(it+1, curr_off << 3);	// STEP 4
+											if ((search_reg->second).off_bits.size() > (search_reg->second).off_bits_max_size)
+												(search_reg->second).off_bits_max_size = (search_reg->second).off_bits.size();
+										}
+										else
+											assert(0);
+											 
+									}		
+								}
+								else
+								{
+									// If curr_off is present in vector, then
+									//		1) reset occurence of next offset of curr_off
+									// 		2) delete curr_offset
+									//		3) insert curr_off as next offset with occurence = 0
+
+									vector<uint16_t>::iterator iter = (search_reg->second).off_bits.begin();
+									for (iter; iter != (search_reg->second).off_bits.end(); iter++)
+									{
+										if (((*iter) >> 3) == curr_off)
+										{
+											if ((iter+1) != (search_reg->second).off_bits.end() && ((*(iter+1)) & 0x1) == 1)
+												(*(iter+1)) = (*(iter+1)) - 1;	// STEP 1 
+											(search_reg->second).off_bits.erase(iter);	// STEP 2
+											break;
+										}
+									}
+
+									if ((search_reg->second).off_bits.size() > 0)
+									{
+										(search_reg->second).off_bits.insert((search_reg->second).off_bits.end(), curr_off << 3);	// STEP 3
+										if ((search_reg->second).off_bits.size() > (search_reg->second).off_bits_max_size)
+											(search_reg->second).off_bits_max_size = (search_reg->second).off_bits.size();
+									}
+									else
+									{
+										if ((search_ip->second).last_trans & 0xFFF != curr_off)
+											assert(0);
+									}
+								}
+								//DEBUG(if(ip==94320733777782){
+								#ifdef DEBUG_PREF
+								cout << "new-pair insert: "<<hex<<((search_ip->second).last_trans & 0xFFF)<<"-"<<curr_off<<endl;//});
+								#endif
+								break;
+							}
+						} 
+						if (!found_prev_off)
+						{
+							//cout << "prev-offbits:" << hex << (search_reg->second).off_bits[0] << " removed useless_no: " ; 
+							//cout << ((search_reg->second).off_bits[0] >> 3) << endl;
+							//cout << "prev-trans bits: " << ((search_ip->second).last_trans & 0xFFF) << dec << endl; 
+							cout << "Previous offset not found, then where to insert ???" << endl;
+							//assert(0);
+						}
+					}
+					else
+					{
+						auto search_prev_reg = (search_ip->second).sequence.find((search_ip->second).last_trans >> 12);
+						(search_prev_reg->second).next_region = region;
+						// if off_bits size > 0, then, reset occurence counter
+						cout << "Prev_reg: " << hex << (search_prev_reg->first) << " next_reg: " << region << endl; 
+						if (((search_reg->second).off_bits[0] >> 3) != curr_off)
+						{
+							if (((search_reg->second).off_bits[0] & 0x1) == 1)
+								(search_reg->second).off_bits[0] = ((search_reg->second).off_bits[0] >> 1) << 1; 
+							(search_reg->second).off_bits.insert((search_reg->second).off_bits.begin(), curr_off << 3);
+							if ((search_reg->second).off_bits.size() > (search_reg->second).off_bits_max_size)
+								(search_reg->second).off_bits_max_size = (search_reg->second).off_bits.size();
+						}
+						else if (((search_reg->second).off_bits[0] >> 3) == curr_off && ((search_reg->second).off_bits[0] & 0x1) == 0)
+							(search_reg->second).off_bits[0] += 1;
+					}	
+				//}
+			}
+			else if (search_reg != (search_ip->second).sequence.end() && (search_reg->second).off_bits.size() == 0)
+			{
+				(search_reg->second).off_bits.insert((search_reg->second).off_bits.begin(), curr_off << 3);
+				if ((search_reg->second).off_bits.size() > (search_reg->second).off_bits_max_size)
+					(search_reg->second).off_bits_max_size = (search_reg->second).off_bits.size();
+				auto search_prev_reg = (search_ip->second).sequence.find((search_ip->second).last_trans >> 12);
+				(search_prev_reg->second).next_region = region;
+			}
+			else
+			{
+				////(NOT POSSIBLE) If prev and curr region are same, just insert offset bits after previous offset in vector
+				//  set next_region for prev region map and enter offset in next region's map
+				if (region == (search_ip->second).last_trans >> 12)
+					assert(0);
+				else
+				{
+					search_reg = (search_ip->second).sequence.find((search_ip->second).last_trans >> 12);
+					(search_reg->second).next_region = region;
+					struct offset Offset;
+					auto it = Offset.off_bits.begin();
+					Offset.off_bits.insert(it, curr_off << 3);
+					Offset.next_region = UINT64_MAX;
+					Offset.off_bits_max_size = 1;
+					(search_ip->second).sequence.insert({region, Offset});
+					DEBUG(if(ip==94320733777782){
+					cout << "Cycle: " << dec << current_core_cycle[cpu] << " IP: " << hex << ip << " new_Region: " << region ;
+					cout << " off_bits[0] " << curr_off << dec << endl;  });
+					//#endif
+				}				
+			}
+			(search_ip->second).last_trans = addr; 
+		}
+		else
+		{
+			struct metadata Metadata;
+			struct offset Offset;
+			auto it = Offset.off_bits.begin();
+			Offset.off_bits.insert(it, curr_off << 3);
+			Offset.next_region = UINT64_MAX;
+			Offset.off_bits_max_size = 1;
+			Metadata.last_trans = addr; 
+			Metadata.sequence.insert({region, Offset}); 
+			perIP[cpu][thread_ID].insert({ip, Metadata});
+			DEBUG(if(ip==94320733777782){
+			cout << "Cycle: " << current_core_cycle[cpu] << " NEW IP inserted:IP- " << hex << ip << " Region: " << region << " off_bits[0]= ";
+			cout << curr_off << dec << endl;});
+			//#endif	
+		}
+	}
+
+}
+
+void CACHE::stlb_prefetcher_send_feedback(uint64_t pf_metadata, uint64_t address, uint64_t prefetch_id)
+{
+	uint16_t thread_index = ((1 << LOG2_THREADS) - 1) & prefetch_id;
+	uint8_t asid;
+	if (knob_cloudsuite)
+	{
+		thread_index = 0;
+		asid = address & 0xFF;
+		address = address >> 9;
+	}
+	uint64_t region = address >> 12;	//removing offset bits
+	uint16_t curr_off = address & 0xFFF; 
+	auto search_ip = perIP[cpu][thread_index].find(pf_metadata);
+	if (search_ip != perIP[cpu][thread_index].end())
+	{
+		auto search_reg = (search_ip->second).sequence.find(region);
+		if (search_reg != (search_ip->second).sequence.end())
+		{
+			int found_offset = 0;
+			for(int i = 0; i < (search_reg->second).off_bits.size(); i++)
+			{
+				if ((search_reg->second).off_bits[i] >> 3 == curr_off)
+				{
+					found_offset = 1;
+					uint8_t useless_pf = ((search_reg->second).off_bits[i] >> 1) & 0x3;
+					if (useless_pf < 3)
+					{
+						DEBUG(if(pf_metadata == 94320733777782){
+						cout << "USELESS PF: " << (uint16_t)useless_pf;});
+						//#endif
+						useless_pf++;
+						useless_pf = (useless_pf << 1) | ((search_reg->second).off_bits[i] & 0x1);
+						(search_reg->second).off_bits[i] = ((search_reg->second).off_bits[i] >> 3) << 3 | useless_pf;
+						DEBUG(if(pf_metadata == 94320733777782){
+						cout << " new offset: " << (search_reg->second).off_bits[i] << dec << endl;});
+						//#endif
+					}
+				}	
+			}
+		}
+	}
+	else
+	{
+		cout << "IP: " << hex << pf_metadata << dec << endl;
+		assert(0);
+	}
+	
+}
+
+void CACHE::stlb_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+
+}
+
+void CACHE::stlb_prefetcher_final_stats()
+{
+	cout << "Number of prefetches requested - " << pcoff_prefetches_made[cpu] << endl;
+        cout << "Number of prefetches dropped - " << pcoff_prefetches_dropped[cpu] << endl;
+
+	cout << "Number of entries - " << perIP[0][0].size() << " " << perIP[0][1].size() << endl;
+	uint64_t count_offbits = 0;
+	for (uint16_t thread_index = 0; thread_index < MAX_THREADS; thread_index++)
+	{
+		cout << "Stats for Thread: " << thread_index << endl;
+		cout << "Number of entries: " << perIP[cpu][thread_index].size() << endl;
+		map <uint64_t, struct metadata>::iterator it = perIP[cpu][thread_index].begin();
+		for (it; it != perIP[cpu][thread_index].end(); it++)
+		{
+			cout << "IP: " << (it->first) << endl;
+			cout << "Region map size: " << dec << (it->second).sequence.size() << endl;
+			map <uint64_t, struct offset>::iterator trav_region = (it->second).sequence.begin();
+			for (trav_region; trav_region != (it->second).sequence.end(); trav_region++)
+			{
+				count_offbits += (trav_region->second).off_bits_max_size;
+				cout << "Region: " << hex << (trav_region->first) << " Off_bits_size: " << dec << (trav_region->second).off_bits.size();	
+				cout << " Next Region: " << hex << (trav_region->second).next_region << " max-size: " << (trav_region->second).off_bits_max_size;
+				cout << dec << endl;
+			} 		
+		}
+	}
+	count_offbits = count_offbits * 15;
+	cout << endl << "Total off_bits size: " << count_offbits << " bits, " << (count_offbits/8) << " Bytes, " ;
+	count_offbits = count_offbits/8;
+	cout << (count_offbits/1024) << " KB" << endl;
+}

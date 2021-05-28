@@ -1,0 +1,195 @@
+#include "cache.h"
+
+#include <set>
+#include <map>
+#include <vector>
+#include <iterator>
+
+//Neelu: Adding structures for region wise dense training. 
+#define NUM_OF_DENSE_REGIONS 64
+#define DENSE_REGION_TRAINING_THRESHOLD 8
+#define NUM_OF_TRAINING_REGIONS 8
+#define LOG2_REGION_SIZE 11	//2KB region
+#define NUM_OF_LINES_IN_REGION 32 //32
+#define LOG2_NUM_OF_LINES_IN_REGION 5
+
+struct bit_vector_lru
+{
+        uint8_t bit_vector[NUM_OF_LINES_IN_REGION];
+        uint8_t lru;
+};
+
+vector<uint64_t> regions_identified_as_dense;
+//set<uint64_t> regions_identified_as_dense;
+map<uint64_t, struct bit_vector_lru> dense_region_training;
+
+set<uint64_t> all_dense_regions;
+
+uint64_t regions_trained_as_dense = 0, regions_in_training = 0, dense_region_prefetches = 0;
+int l2_warmup_flag = 0;
+
+
+void CACHE::l2c_prefetcher_initialize() 
+{
+
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in)
+{
+	if(warmup_complete[cpu] && (l2_warmup_flag == 0))
+	{
+		regions_trained_as_dense = regions_in_training = dense_region_prefetches = 0;	
+		l2_warmup_flag = 1;
+	}
+
+	uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+
+	//Neelu: Based on addr, for each 2KB region, region-wise training will be conducted.
+	uint64_t region_id = addr >> LOG2_REGION_SIZE;
+	int region_training = 0, region_dense =0;
+	uint64_t region_offset = cl_addr & ((1 << LOG2_NUM_OF_LINES_IN_REGION)-1);
+
+//	cout << "Reg id: " << region_id << ", Reg offset: " << region_offset << endl;
+
+	//Check if region is in the training phase.
+
+	if(dense_region_training.find(region_id) != dense_region_training.end())
+	{
+		map<uint64_t, struct bit_vector_lru>::iterator trainer = dense_region_training.find(region_id);
+
+	//	cout << " Trainer lru: " << unsigned(trainer->second.lru) << endl;	
+		//update lru
+		map<uint64_t, struct bit_vector_lru>::iterator it = dense_region_training.begin();
+		while(it != dense_region_training.end())
+		{
+//			cout << "LRU: " << unsigned(it->second.lru) << endl;
+			if(it->second.lru < trainer->second.lru)
+				it->second.lru++;
+			it++;
+		}
+		trainer->second.lru = 0;
+
+		region_training = 1;
+		trainer->second.bit_vector[region_offset] = 1;
+
+		int lines_accessed_count = 0;
+		//check if the region has become dense
+		//cout << "Bit vector: ";
+		for(int i = 0; i < NUM_OF_LINES_IN_REGION; i++)
+		{
+			//cout << unsigned(trainer->second.bit_vector[i]);
+			if(trainer->second.bit_vector[i] == 1)
+				lines_accessed_count++;
+
+		}
+			//cout << endl << "Training Region hit: " << region_id << " offset: " << region_offset << " dense count: " << lines_accessed_count << endl;
+
+		if(lines_accessed_count >= DENSE_REGION_TRAINING_THRESHOLD)
+		{
+			//insert into identified as dense and remove from training
+			regions_trained_as_dense++;
+			regions_identified_as_dense.push_back(region_id);
+			all_dense_regions.insert(region_id);
+			//regions_identified_as_dense.insert(region_id);
+			if(regions_identified_as_dense.size() > NUM_OF_DENSE_REGIONS) 
+			{
+				regions_identified_as_dense.erase(regions_identified_as_dense.begin());
+			}
+			//first update lru, and then remove from training phase.
+			map<uint64_t, struct bit_vector_lru>::iterator to_update_lru = dense_region_training.begin();
+        	        while(to_update_lru != dense_region_training.end())
+	                {
+				if(to_update_lru->second.lru > trainer->second.lru)
+                                	to_update_lru->second.lru--;	
+				to_update_lru++;
+			}
+			dense_region_training.erase(region_id);	
+		}	
+		 	
+	}
+	
+	for(int i = 0; i< regions_identified_as_dense.size(); i++)
+	{
+		if(regions_identified_as_dense[i] == region_id)
+		{
+			region_dense = 1;
+			break;
+		}
+	}	
+
+        //if(regions_identified_as_dense.find(region_id) != regions_identified_as_dense.end())
+        if(region_dense == 1)
+	{
+                //Neelu: region prefetching 2 till L1, 16 till L2, handle metadata stuff.
+		
+		//So, basically, I'm gonna set the 15th bit to prefetch the first half of the dense region and 16th for second half.
+	
+		dense_region_prefetches+=2;
+	
+		#ifdef DO_PREF
+		if((addr >> LOG2_PAGE_SIZE) == ((cl_addr+1)>>(LOG2_PAGE_SIZE - LOG2_BLOCK_SIZE)))
+			prefetch_line(ip, addr, (cl_addr+1)<<LOG2_BLOCK_SIZE , FILL_L2, 0);	// 1 << 17);
+		if((addr >> LOG2_PAGE_SIZE) == ((cl_addr+2)>>(LOG2_PAGE_SIZE - LOG2_BLOCK_SIZE)))
+			prefetch_line(ip, addr, (cl_addr+2) << LOG2_BLOCK_SIZE, FILL_L2, 0);	// 1 << 18);
+		#endif	
+
+	}
+
+	if(region_training == 0 && region_dense == 0)
+	{
+		struct bit_vector_lru temp_bvl;
+		
+		int drt_size = dense_region_training.size();
+		uint64_t victim_region_id = 0;
+		map<uint64_t, struct bit_vector_lru>::iterator it = dense_region_training.begin();
+                
+		while(it != dense_region_training.end())
+                {
+			//cout << "Lru value: " << unsigned(it->second.lru) << endl;
+			if(drt_size >= NUM_OF_TRAINING_REGIONS)
+				if(it->second.lru == (NUM_OF_TRAINING_REGIONS-1))
+					victim_region_id = it->first;
+                        if(it->second.lru < drt_size)
+				it->second.lru++;
+                        it++;
+                }
+
+		for(int i = 0; i < NUM_OF_LINES_IN_REGION; i++)
+			temp_bvl.bit_vector[i] = 0;
+
+		temp_bvl.bit_vector[region_offset]=1;
+
+		temp_bvl.lru = 0;
+
+		dense_region_training.insert(pair<uint64_t, struct bit_vector_lru>(region_id, temp_bvl));
+		regions_in_training++;
+
+		if(drt_size >= NUM_OF_TRAINING_REGIONS)
+		{
+			dense_region_training.erase(victim_region_id);
+			//cout << "Victim Rid: " <<victim_region_id << endl; 
+		}
+		//cout << "DRT Size: " << dense_region_training.size() << endl;
+		assert(dense_region_training.size() <= NUM_OF_TRAINING_REGIONS); 
+
+	}
+
+	metadata_in = metadata_in | (1 << 17);
+
+  return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+  return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+	cout << "Dense Region Trained Count: " << regions_trained_as_dense << endl;
+	cout << "Regions in Training: " << regions_in_training << endl;
+	cout << "Dense Region Training Map Size: " << dense_region_training.size() << endl;
+	cout << "Dense Region Trained Vector Size: " << regions_identified_as_dense.size() << endl;
+	cout << "L1D Dense Region Prefetches: " << dense_region_prefetches << endl;
+	cout << "Num of Unique Dense Regions: " << all_dense_regions.size() << endl;
+}

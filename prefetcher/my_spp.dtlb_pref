@@ -1,0 +1,525 @@
+//SPP for DTLB prefetcher
+#include "champsim.h"
+#include "ooo_cpu.h"
+#include <map>
+#include <iterator>
+#include <set>
+
+#define NUM_OF_OFFSET_BITS (knob_cloudsuite ? 13 : 4)
+#define SIG_DELTA_BIT 5
+//#define THRESHOLD 0.75
+//#define DEBUG
+#define CRITICALITY_BASED
+#define NUM_REG_TRACKED 5
+
+
+struct Delta_table
+{
+	map <int, int> delta_count;	//stores multiple delta for a signature with count
+	int c_sign;	//count of occurence of signature
+};
+
+struct Metadata_per_region
+{
+	map <uint64_t, struct Delta_table> sign_delta_table;	//stores the next delta given signature with 
+	int last_offset;					//stores last offset seen for a region
+	uint64_t last_signature;				//stores signature seen till previous access
+
+};
+
+//Thread-ID will be appended with region-ID
+map <uint64_t, struct Metadata_per_region> metadata_of_region[NUM_CPUS];
+
+map <uint64_t, uint64_t> prev_eq_curr[NUM_CPUS];
+uint64_t last_translation_accessed[NUM_CPUS][MAX_THREADS];
+
+struct translation_data
+{
+	uint64_t count;
+	uint64_t last_accessed_cycle;
+	float avg_cycle_diff;
+	int throttle;
+};
+
+map <uint64_t, struct translation_data> metadata_of_translation[NUM_CPUS];
+
+//Map to invoke prefetching of a region
+struct Region_set
+{
+	map <uint64_t, uint64_t> region_count;			//stores region-ID of region 2 and its occurence
+	uint64_t c_region;					//count occurence of region 1
+};
+map <uint64_t, struct Region_set> region_map[NUM_CPUS];
+uint64_t last_region_accessed[NUM_CPUS][MAX_THREADS][NUM_REG_TRACKED];
+uint64_t cycle_region_accessed[NUM_CPUS][MAX_THREADS][NUM_REG_TRACKED];
+int tail[NUM_CPUS][MAX_THREADS];
+
+//STATS
+uint64_t prefetches_made[NUM_CPUS]={0}, prefetches_dropped[NUM_CPUS]={0};
+
+#ifdef CRITICALITY_BASED
+//set<uint64_t> critical_translations[NUM_CPUS][MAX_THREADS];
+#endif
+
+void CACHE::dtlb_prefetcher_initialize()
+{
+	cout << "Using MY_SPP for DTLB with dynamic THRESHOLD\n"; // THRSHOLD : " << THRESHOLD <<  endl;
+	for (uint64_t cpu_no=0; cpu_no < NUM_CPUS; cpu_no++)
+		for (uint16_t thread_index=0; thread_index < ooo_cpu[cpu].thread; thread_index++)
+			for (int count=0; count < NUM_REG_TRACKED; count++)
+			{
+				last_region_accessed[cpu_no][thread_index][count] = UINT64_MAX;
+				tail[cpu_no][thread_index] = 0;
+			}
+}
+
+int weight (uint64_t current_cycle, uint64_t prev_accessed_cycle)
+{
+	if(current_cycle - prev_accessed_cycle <= 15)	//15)	//5)
+		return 1;
+	else if (current_cycle - prev_accessed_cycle <= 30)	//30)	//10)
+		return 2;
+	else if (current_cycle - prev_accessed_cycle <= 60)	//60)	//20)
+		return 3;
+	else
+		return -1;	
+}
+
+void CACHE::dtlb_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type,  uint64_t prefetch_id, uint8_t instruction, uint8_t critical_ip_flag)
+{
+	int prefetch_delta, flag, delta, sig_delta, diff;
+	uint64_t region_ID = addr >> NUM_OF_OFFSET_BITS;
+	uint16_t offset = addr & ((1 << NUM_OF_OFFSET_BITS) - 1);	//includes ASID in case of cloudsuite
+	if (knob_cloudsuite)
+		offset = offset >> 9;
+	uint16_t thread_ID = prefetch_id & ((1 << LOG2_THREADS) - 1);
+	
+	region_ID = (region_ID << LOG2_THREADS) | thread_ID ;
+	if (knob_cloudsuite)
+		region_ID = (region_ID << 9) | (((1 << 9) - 1) & addr);	//add ASID in case of cloudsuite benchmarks
+	
+	#ifdef DEBUG
+	cout << "Cycle: " << dec << current_core_cycle[cpu] << " T" << thread_ID << " REGION ID: " << hex << region_ID << " addr: " << addr << " HIT: " << (uint16_t)cache_hit <<  " dumped region: " << (addr >> 13) << dec << endl;
+	#endif                
+
+	#ifdef CRITICALITY_BASED
+	if (critical_ip_flag)
+	{        
+	#endif
+		//search this regionID in map
+		auto it = metadata_of_region[cpu].find(region_ID);
+		if (it != metadata_of_region[cpu].end())
+		{
+			delta = offset - (it->second).last_offset;
+			sig_delta = (delta < 0) ? (((-1) * delta) + (1 << (SIG_DELTA_BIT - 1))) : delta; 
+			uint64_t new_signature = (it->second).last_signature << 5 | (((1 << 5) - 1) & sig_delta);
+			new_signature = new_signature & ((1 << 20) - 1);		
+			
+			#ifdef DEBUG
+			cout << "LAST_OFFSET: "<<hex<< (it->second).last_offset << " OLD SIGNATURE: " << (it->second).last_signature << " delta: " << dec<< delta << " hex:  " << hex << delta;
+			cout << " sig_delta: " << sig_delta <<  " NEW SIGNATURE : " << new_signature  << " HIT: " <<dec<< (uint16_t)cache_hit << endl;
+			#endif
+
+			//update delta of last_signature
+			auto search = (it->second).sign_delta_table.find((it->second).last_signature);
+			//auto search_delta;
+			if (search != (it->second).sign_delta_table.end() )
+			{
+				(search->second).c_sign++;
+				
+				//if delta found, increase count of delta, else, insert new delta with count = 1
+				auto search_sig_delta = (search->second).delta_count.find(sig_delta);
+				if (search_sig_delta != (search->second).delta_count.end())
+				{
+					search_sig_delta->second++;
+					#ifdef DEBUG
+					map <int, int>::iterator print_delta = (search->second).delta_count.begin();
+					//for (print_delta; print_delta != (search->second).delta_count.end(); print_delta++)
+					//	cout << hex << "Sig_Delta:"<< print_delta->first << " Count:" << dec << print_delta->second << "   ";
+					//cout << endl;
+					#endif
+				}
+				else
+				{
+					(search->second).delta_count.insert (pair <int, int> (sig_delta, 1) );
+					#ifdef DEBUG
+					map <int, int>::iterator print_delta = (search->second).delta_count.begin();
+					//for (print_delta; print_delta != (search->second).delta_count.end(); print_delta++)
+					//	cout << dec << "Delta:"<< print_delta->first << " Count:" << dec <<  print_delta->second << "   ";
+					//cout << endl;
+					#endif
+				}	
+			}
+			else
+			{	
+				//insert last_signature with delta
+				struct Delta_table new_delta;
+				new_delta.c_sign = 1;
+				new_delta.delta_count.insert(pair <int, int> (sig_delta, 1));
+				(it->second).sign_delta_table.insert (pair <uint64_t, struct Delta_table> ((it->second).last_signature, new_delta));
+			}
+			//if (warmup_complete[cpu][thread_ID])
+			/*if ((search->second).delta_count.size() > 0)
+			{
+				#ifdef DEBUG
+				map <int, int>::iterator print_delta = (search->second).delta_count.begin();
+				for (print_delta; print_delta != (search->second).delta_count.end(); print_delta++)
+					cout << dec << "Delta:"<< print_delta->first << " Count:" << print_delta->second << "   ";
+				cout << endl;
+				#endif
+			}*/
+
+
+			(it->second).last_signature = new_signature;
+			(it->second).last_offset = offset;
+		}
+		else
+		{
+			//insert new region 
+			struct Metadata_per_region new_region;
+			new_region.last_offset = offset;
+			new_region.last_signature = UINT64_MAX;
+			metadata_of_region[cpu].insert (pair <uint64_t, struct Metadata_per_region> (region_ID, new_region));
+		}	
+	#ifdef CRITICALITY_BASED
+	}
+	#endif
+	
+	//PREFETCH next region (prepare a map for that)
+	auto search_region = region_map[cpu].find(region_ID);
+	if (search_region != region_map[cpu].end())
+	{
+		//start prefetching
+		map <uint64_t,uint64_t>::iterator next_region = (search_region->second).region_count.begin();
+		for ( ; next_region != (search_region->second).region_count.end(); next_region++)
+		{
+			float prob = (float)(next_region->second) / (float)(search_region->second).c_region;
+			float THRESHOLD;
+			if ((search_region->second).c_region <= 50 && (search_region->second).c_region > 10)
+				THRESHOLD = 0.7;	//0.4;	//0.7;
+			else if ((search_region->second).c_region <= 100)
+				THRESHOLD = 0.7;	//0.35;	//0.7;
+			else if ((search_region->second).c_region <= 500)
+				THRESHOLD = 0.6;	//0.2;//0.8	//0.5;
+			else if ((search_region->second).c_region <= 1000)
+				THRESHOLD = 0.5;	//0.05;//0.7	//0.5;
+			else if ((search_region->second).c_region <= 10000)
+				THRESHOLD = 0.4;	//01;	//0.4;
+			else
+				THRESHOLD = 0.3;	//0.01;
+			if (prob > THRESHOLD)	// || next_region->second > 10)
+			{
+				auto search_metadata = metadata_of_region[cpu].find (next_region->first);
+				if (search_metadata != metadata_of_region[cpu].end() )
+				{
+					//find last_signature to start prefetching
+					auto search_signature = (search_metadata->second).sign_delta_table.find ((search_metadata->second).last_signature);
+					if (search_signature != (search_metadata->second).sign_delta_table.end())
+					{
+						//search most frequent delta
+						map <int, int>::iterator deltas = (search_signature->second).delta_count.begin();
+						int max_count = 1;
+						flag = 0;
+						for ( ; deltas != (search_signature->second).delta_count.end(); ++deltas)
+						{
+							if (deltas->second > max_count)
+							{
+								max_count = deltas->second;
+								prefetch_delta = deltas->first;
+								flag = 1;
+							} 			
+						}  		
+					}
+					
+		
+				}
+				//else
+				//	assert(0);
+				if (flag)
+				{
+					// <<< region_ID(no thread_ID or asid) + last_offset + delta + asid >>> needs to be prefetched
+					uint64_t pf_addr = (((next_region->first) >> (LOG2_THREADS + (knob_cloudsuite?9:0))) << NUM_OF_OFFSET_BITS) | 
+						(knob_cloudsuite ? (search_metadata->second).last_offset << 9 : (search_metadata->second).last_offset);
+					#ifdef DEBUG
+					cout<<"Cycle: " << dec << current_core_cycle[cpu] << hex<<" PREFETCH: " << "T" << thread_ID << " last_offset: " <<(search_metadata->second).last_offset << 
+						" sig_delta: "<<prefetch_delta <<" PF_ADDR : ";	// << pf_addr << " " ;
+					#endif
+					int sign = 0;
+					sign = (1 << (SIG_DELTA_BIT - 1)) & prefetch_delta;
+					prefetch_delta = prefetch_delta & ((1 << (SIG_DELTA_BIT - 1)) - 1);
+					if (sign > 0)	//subtract delta from offset
+						pf_addr = pf_addr - (knob_cloudsuite ? prefetch_delta << 9 : prefetch_delta);
+					else
+						pf_addr = pf_addr + (knob_cloudsuite ? prefetch_delta << 9 : prefetch_delta);
+					#ifdef DEBUG
+					//cout << pf_addr << " ";
+					#endif
+					pf_addr = pf_addr | (next_region->first & 0x1FF);
+					#ifdef DEBUG
+					cout << " FINAL:" << pf_addr << " REGION: " << (pf_addr >> NUM_OF_OFFSET_BITS) << " REGION_ID: "<<next_region->first <<" initiated by: " << region_ID << dec;
+					#endif
+
+					#ifdef CRITICALITY_BASED
+					if (critical_translation[cpu][knob_cloudsuite?0:thread_ID].find(pf_addr) != critical_translation[cpu][knob_cloudsuite?0:thread_ID].end() 
+						&& pf_addr >> NUM_OF_OFFSET_BITS == next_region->first >> (knob_cloudsuite? (9+LOG2_THREADS) : LOG2_THREADS) )
+					//Only intra-region prefetches allowed
+					{
+					#endif
+						if (pf_addr != addr)
+						{
+							#ifdef DEBUG
+							cout << endl;
+							#endif
+							if (warmup_complete[cpu][thread_ID])
+								prefetches_made[cpu]++;
+							if (!prefetch_translation(ip, pf_addr, FILL_DTLB, region_ID, prefetch_id, instruction))
+							if (warmup_complete[cpu][thread_ID])
+								prefetches_dropped[cpu]++; 
+						}
+						else
+						{
+							#ifdef DEBUG
+							cout  << "PREFETCH DROPPED " << endl;
+							#endif
+						}
+					#ifdef CRITICALITY_BASED
+					}
+					#endif
+				}
+				flag = 0;
+			}
+		}
+
+	}
+	
+
+	#ifdef CRITICALITY_BASED
+	if (critical_translation[cpu][knob_cloudsuite?0:thread_ID].find(addr) != critical_translation[cpu][knob_cloudsuite?0:thread_ID].end())
+	{
+	#endif
+		// STRATEGY 1 : MAP CREATED FOR MISS, BUT COUNTER INCREASED FOR HITS AS WELL AS MISSES
+		int last_region = tail[cpu][thread_ID], counter;
+		last_region--;
+		if (last_region == -1)
+			last_region = NUM_REG_TRACKED - 1;
+		counter = 0;
+		while (last_region != tail[cpu][thread_ID])
+		{
+			if (current_core_cycle[cpu] - cycle_region_accessed[cpu][thread_ID][last_region] > 0)
+			{
+				auto search = region_map[cpu].find(last_region_accessed[cpu][thread_ID][last_region]);
+				if (search != region_map[cpu].end())
+				{
+					auto search_region = (search->second).region_count.find(region_ID);
+					if (search_region != (search->second).region_count.end())
+					{
+						counter++;
+						if (counter <= 3)
+						{
+							int weight_value = weight(current_core_cycle[cpu], cycle_region_accessed[cpu][thread_ID][last_region]); 
+							if (weight_value > 0)
+							{
+								(search_region->second) += weight_value;
+								(search->second).c_region++;
+							}
+						}
+					} 
+					if (cache_hit == 0 && search_region == (search->second).region_count.end() && counter <= 2)
+					{
+						counter++;
+						int weight_value = weight(current_core_cycle[cpu], cycle_region_accessed[cpu][thread_ID][last_region]); 
+						if (weight_value > 0)
+						{
+							(search->second).region_count.insert (pair <uint64_t, uint64_t> (region_ID, weight_value));
+							(search->second).c_region++;
+							#ifdef DEBUG
+							cout << "\nCycle: "<<dec<<current_core_cycle[cpu] << " MAP CREATED: T" <<thread_ID<<" " << hex << last_region_accessed[cpu][thread_ID][last_region] << " - " << region_ID << " " << dec << counter << " Cycle diff: " << (current_core_cycle[cpu] - cycle_region_accessed[cpu][thread_ID][last_region]) << endl; 
+							#endif
+						}
+					}
+				}
+				if (search == region_map[cpu].end() && cache_hit == 0 && last_region_accessed[cpu][thread_ID][last_region] != UINT64_MAX && counter <=2)
+				{
+					counter++;
+					struct Region_set new_region_count;
+					new_region_count.c_region = 1;
+					new_region_count.region_count.insert (pair <uint64_t, uint64_t> (region_ID, counter));
+					region_map[cpu].insert (pair <uint64_t, struct Region_set> (last_region_accessed[cpu][thread_ID][last_region], new_region_count));
+					#ifdef DEBUG
+					cout << "\nCycle: "<<dec<<current_core_cycle[cpu] << " MAP CREATED: T" << thread_ID <<" " <<  hex << last_region_accessed[cpu][thread_ID][last_region] << " - " << region_ID << " "  << dec << counter << " Cycle diff: " << (current_core_cycle[cpu] - cycle_region_accessed[cpu][thread_ID][last_region]) << hex << endl; 
+					#endif
+				}
+			}
+			last_region--;
+			if (last_region == -1)
+				last_region = NUM_REG_TRACKED - 1;
+		}
+
+	#ifdef  CRITICALITY_BASED
+	}
+	#endif
+	
+	if (metadata_of_translation[cpu].find(addr) != metadata_of_translation[cpu].end())
+	{
+		auto iter = metadata_of_translation[cpu].find(addr);
+		if ((iter->second).last_accessed_cycle == -1)
+			(iter->second).last_accessed_cycle = current_core_cycle[cpu];
+		else
+		{
+			diff = current_core_cycle[cpu] - (iter->second).last_accessed_cycle;
+			(iter->second).avg_cycle_diff = ((iter->second).count * (iter->second).avg_cycle_diff) + diff;
+			(iter->second).count++;
+			(iter->second).avg_cycle_diff = (iter->second).avg_cycle_diff / (iter->second).count;
+			(iter->second).last_accessed_cycle = current_core_cycle[cpu];
+		}
+	}
+	if (region_ID != last_region_accessed[cpu][thread_ID][tail[cpu][thread_ID] == 0 ? (NUM_REG_TRACKED-1) : (tail[cpu][thread_ID]-1)] )
+	{ 
+		last_region_accessed[cpu][thread_ID][tail[cpu][thread_ID]] = region_ID;
+		cycle_region_accessed[cpu][thread_ID][tail[cpu][thread_ID]] = current_core_cycle[cpu];
+		tail[cpu][thread_ID]++;
+		if (tail[cpu][thread_ID] == NUM_REG_TRACKED)
+			tail[cpu][thread_ID] = 0;
+	}
+	else
+	{
+		if (addr == last_translation_accessed[cpu][thread_ID])
+		{
+			if (metadata_of_translation[cpu].find(addr) == metadata_of_translation[cpu].end())
+			/*{
+				//auto it = prev_eq_curr[cpu].find(addr);
+				//it->second++;
+				auto iter = metadata_of_translation[cpu].find(addr);
+				diff = current_core_cycle[cpu] - (iter->second).last_accessed_cycle;
+				(iter->second).avg_cycle_diff = ((iter->second).count * (iter->second).avg_cycle_diff) + diff;
+				(iter->second).count++;
+				(iter->second).avg_cycle_diff = (iter->second).avg_cycle_diff / (iter->second).count;
+				(iter->second).last_accessed_cycle = current_core_cycle[cpu];
+			}else*/ //if (critical_translation[cpu][0].find(addr) != critical_translation[cpu][0].end())
+	 		{
+				struct translation_data new_data;
+				new_data.count = 1;
+				new_data.last_accessed_cycle = current_core_cycle[cpu];
+				new_data.avg_cycle_diff = 0;
+				new_data.throttle = 0; 
+				metadata_of_translation[cpu].insert( pair <uint64_t, struct translation_data> (addr, new_data));
+				prev_eq_curr[cpu].insert( pair <uint64_t, uint64_t> (addr, 1) );
+			}
+		}
+	}
+	last_translation_accessed[cpu][thread_ID] = addr;
+}
+
+uint64_t CACHE::dtlb_prefetcher_cache_fill( uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in, uint16_t thread_ID)
+{
+	#ifdef DEBUG
+	cout << "Cycle :" << dec << current_core_cycle[cpu] <<" T" << thread_ID<<"  Evicted addr: "<<hex<<evicted_addr;
+	cout <<" Evicted Region: " << (evicted_addr>>13) << " LOAD addr: "<<addr<<" LOAD Region: "<<(addr >> 13)<< dec << endl; 
+	#endif
+	#ifdef PUSH_VICTIMS_DTLB_VB
+	/*if (prev_eq_curr[cpu].find(evicted_addr) != prev_eq_curr[cpu].end())
+	{
+		auto it = prev_eq_curr[cpu].find(evicted_addr);
+		if (it->second > 50)
+		{
+			//insert in DTLB victim buffer
+			#ifdef DEBUG
+			cout << "Cycle: " << current_core_cycle[cpu] << " address entering DTLB VB " << evicted_addr << endl; 
+			#endif
+			return 1;
+		} 
+		return 0;
+	}*/
+	if (metadata_of_translation[cpu].find(evicted_addr) != metadata_of_translation[cpu].end())
+	{
+		auto it = metadata_of_translation[cpu].find(evicted_addr);
+		//if ((it->second).count > 50)
+		//if ((it->second).throttle < -5)
+		//	(it->second).throttle--;	
+		if ((it->second).avg_cycle_diff <= 250 && (it->second).throttle >= -5 )		
+		{
+			return 1;
+		}
+		//if ((it->second).throttle == -15)	
+		//	(it->second).throttle = 0;
+		return 0;
+	}
+	#endif
+}
+
+void CACHE::dtlb_victim_buffer_fill( uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in, uint16_t thread_ID )
+{
+	#ifdef PUSH_VICTIMS_DTLB_VB
+	if (metadata_of_translation[cpu].find(evicted_addr) != metadata_of_translation[cpu].end())
+	{
+		auto it = metadata_of_translation[cpu].find(evicted_addr);
+		(it->second).last_accessed_cycle = -1;
+		if (metadata_in == 1)	//block in VB was used
+			(it->second).throttle++;
+		else
+			(it->second).throttle--;
+	}
+	//else
+	//	assert(0);
+	#endif
+}
+
+void CACHE::dtlb_prefetcher_send_feedback(uint64_t region_initiated, uint64_t region_prefetched)
+{
+	int flag = 0;
+	auto search_region = region_map[cpu].find(region_initiated);
+	if (search_region != region_map[cpu].end())
+	{
+		//start prefetching
+		map <uint64_t,uint64_t>::iterator next_region = (search_region->second).region_count.begin();
+		for ( ; next_region != (search_region->second).region_count.end(); next_region++)
+		{
+			if (next_region->first == region_prefetched)
+			{
+				next_region->second--;
+				flag = 1;
+				break;
+			}
+		}
+	}
+	else
+	{
+		cout << "region_initiated - " << region_initiated << " NOT FOUND " << endl;
+		assert(0);
+	}
+	if (!flag)
+	{
+		cout <<region_initiated << endl;
+		cout << "region prefetched " << region_prefetched << " NOT FOUND " << endl;
+		assert(0);	
+	}
+}
+
+void CACHE::dtlb_prefetcher_final_stats()
+{
+	cout << "DTLB PREFETCHER FINAL STATS : " << endl;
+	cout << "PREFETCH_REQUESTED: " << dec << prefetches_made[cpu];
+	cout << " PREFETCHES DROPPED:  "<< prefetches_dropped[cpu];
+	cout << " METADATA_OF_REGION SIZE: " << metadata_of_region[cpu].size() << " REGION_MAP_SIZE: " << region_map[cpu].size() << " same region map: " << prev_eq_curr[cpu].size() << endl;
+	#ifdef DEBUG
+	cout << "Printing region_map"<< endl;
+	map <uint64_t, struct Region_set>::iterator print_region_map = region_map[cpu].begin();
+	for ( ; print_region_map != region_map[cpu].end(); print_region_map++)
+	{
+		map <uint64_t, uint64_t>::iterator print_next_region = (print_region_map->second).region_count.begin();
+		for ( ; print_next_region != (print_region_map->second).region_count.end(); print_next_region++)
+			cout << hex << print_region_map->first<<", "<<dec<<(print_region_map->second).c_region<<" - "<<hex<<print_next_region->first << ", " << dec << print_next_region->second << " prob: " << (float)((float)(print_next_region->second)/(float)((print_region_map->second).c_region)) << endl;
+	}
+
+	cout << "\nWHEN PREVIOUS IS EQUAL TO CURRENT: size : " << prev_eq_curr[cpu].size() << endl  ;
+	map<uint64_t, uint64_t>::iterator itr;
+	for (itr = prev_eq_curr[cpu].begin(); itr != prev_eq_curr[cpu].end(); itr++)
+		cout << hex << itr->first << " #times: " << dec << itr->second  << endl;
+	
+	#endif
+	
+	cout << "Printing metadata  of translation : " << endl;
+	map <uint64_t, struct translation_data>::iterator iter;
+	//for (iter = metadata_of_translation[cpu].begin(); iter != metadata_of_translation[cpu].end(); iter++)
+	//	cout << hex << iter->first << " count: " << dec << (iter->second).count  << " avg: " << (iter->second).avg_cycle_diff << " throttle:"<<(iter->second).throttle<< endl;  	
+}

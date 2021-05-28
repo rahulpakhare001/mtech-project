@@ -1,0 +1,14 @@
+PageRank_1B.trace.gz
+cc_sv.input-uk-2002.champsim.gz
+Radii_100B.trace.gz
+BellmanFord_94B.trace.gz
+MIS_85B.trace.gz
+605.mcf_s-1644B.champsimtrace.xz
+canneal_44B.trace.gz
+Triangle_70B.trace.gz
+BFS_61B.trace.gz
+623.xalancbmk_s-10B.champsimtrace.xz
+620.omnetpp_s-141B.champsimtrace.xz
+cactusADM_1495B.trace.gz
+649.fotonik3d_s-10881B.champsimtrace.xz
+GemsFDTD_716B.trace.gz
