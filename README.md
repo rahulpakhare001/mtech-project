@@ -1,11 +1,7 @@
 <p align="center">
   <h1 align="center"> ChampSim </h1>
-  <p> ChampSim is a trace-based simulator for a microarchitecture study. It is easy to modify and a new replacement policy, branch predictor or prefetcher can be added to the existing codebase. We are using ChampSim for single-core simulation however it can also be used for multicore workloads. It takes application traces as input which can be generated using PIN tool.  Our group has enhanced the original ChampSim available at repository(https://github.com/ChampSim/ChampSim). <br>
-  The enhancements as follows: <br>
-          1. A 5-level Page Table and a Page Table Walker. <br>
-          2. VIPT L1I and L1D Cache. <br>
-          3. Paging-Structure Caches. <br>
-          4. Support for SMT (simultaneous multithreading). <br>
+  <p> ChampSim is a trace-based simulator for a microarchitecture study. We have enhanced the original ChampSim available at repository(https://github.com/ChampSim/ChampSim) to implement and evaluate our idea. It takes application traces as input which can be generated using PIN tool. <br>
+
   <p>
 </p>
 
