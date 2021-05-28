@@ -2,21 +2,17 @@
 
 if [ "$#" -lt 5 ] ; then
     echo "Illegal number of parameters"
-    echo "Usage: ./run_4core.sh [BINARY] [N_WARM] [N_SIM] [N_MIX] [OPTION] [THREAD_CORE_1] [THREAD_CORE_2] [TRACE]"
+    echo "Usage: ./run_SMT_1T.sh [BINARY] [N_WARM] [N_SIM] [TRACE_DIR] [TRACE_T1]"
     exit 1
 fi
 
 DEFAULT_THREAD=1
-TRACE_DIR=${4}
 BINARY=${1}
 N_WARM=${2}
 N_SIM=${3}
-#N_MIX=${4}
-
-OPTION=${7}
+TRACE_DIR=${4}
 THREAD_0=${5}
-#THREAD_1=${6}
-#TRACE=${8}
+
 
 # Sanity check
 if [ -z $TRACE_DIR ] || [ ! -d "$TRACE_DIR" ] ; then
@@ -53,5 +49,5 @@ fi
 
 
 
-mkdir -p results_1core_${N_SIM}M
-(./bin/${BINARY} -warmup_instructions ${N_WARM}000000 -simulation_instructions ${N_SIM}000000   -threads 1 ${OPTION}  -traces   ${TRACE_DIR}/${THREAD_0}  )  &> results_1core_${N_SIM}M/${THREAD_0}-${BINARY}.txt
+mkdir -p results_${N_SIM}M
+(./bin/${BINARY} -warmup_instructions ${N_WARM}000000 -simulation_instructions ${N_SIM}000000   -threads 1 ${OPTION}  -traces   ${TRACE_DIR}/${THREAD_0}  )  &> results_${N_SIM}M/${THREAD_0}-${BINARY}.txt

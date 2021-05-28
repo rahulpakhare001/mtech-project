@@ -6,7 +6,7 @@
 
 // initialize replacement state
 void CACHE::l2c_initialize_replacement() {
-  cout << NAME << " has LRU replacement policy"
+  cout << NAME << " has optimized LRU replacement policy"
        << " Data Insertion Priority: " << L2C_DATA_INSERTION_PRIORITY
        << " Translation Insertion Priority: " << L2C_TRANSLATION_INSERTION_PRIORITY
        << endl;
@@ -142,7 +142,7 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set,
       }
     }
 
-   
+
     if (type == LOAD_TRANSLATION) {
       for (uint32_t i = 0; i < NUM_WAY; i++) {
         if (block[set][i].lru < block[set][way].lru) {
@@ -151,7 +151,7 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set,
       }
       block[set][way].lru = 0; // promote to the MRU position
     }else {
-     
+
       uint32_t hp = 0;
       while(hp < HIT_PROMOTION){
 
@@ -170,7 +170,7 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set,
     }
 */
 
-    
+
   }else {
     // Insertion
 

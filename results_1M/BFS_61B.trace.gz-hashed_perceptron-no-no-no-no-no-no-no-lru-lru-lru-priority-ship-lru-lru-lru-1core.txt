@@ -1,0 +1,32 @@
+
+*** ChampSim Multicore Out-of-Order Simulator ***
+
+Warmup Instructions: 1000000
+Simulation Instructions: 1000000
+Number of CPUs: 1
+LLC sets: 2048
+LLC ways: 16
+Off-chip DRAM Size: 4096 MB Channels: 1 Width: 64-bit Data Rate: 6400 MT/s
+
+Printing OOO stats: 
+FETCH_WIDTH: 6 IFETCH_WIDTH: 12 DECODE_WIDTH: 6 EXEC WIDTH: 6 LQ_WIDTH: 2 SQ_WIDTH: 2 RETIRE_WIDTH: 4 SCHEDULER_SIZE: 128 STA_SIZE: 1408 ROB_SIZE: 352 LQ_SIZE: 128
+CPU 0 is running 1 threads
+Size of one ROB partiton = 352 ROB_SIZE: 352
+Size of STA_Partition = 1408 STA_SIZE: 1408
+CPU: 0 thread: 0 ROB.head: 0 ROB.tail: 0
+CPU: 0 thread: 0 STA_head: 0 STA_tail: 0
+CPU 0 runs /home/rahul/Documents/traces/BFS_61B.trace.gz
+.gz
+CPU- 0 threads- 1
+BTB has LRU replacement policy
+ITLB has LRU replacement policy
+DTLB has LRU replacement policy
+STLB has LRU replacement policy
+L1I has LRU replacement policy
+L1D has LRU replacement policy
+L2C has LRU replacement policy Data Insertion Priority: 7 Translation Insertion Priority: 7
+LLC has SHIP replacement policy, Data insertion rrpv: 2  Translation insertion rrpv: 2
+Heartbeat CPU 0 thread: 0 instructions: 1000003 cycles: 345420 heartbeat IPC: 2.89504 cumulative IPC: 2.89504 (Simulation time: 0 hr 0 min 2 sec) 
+
+Warmup complete CPU 0 thread: 0 instructions: 1000003 cycles: 345420 (Simulation time: 0 hr 0 min 2 sec) 
+

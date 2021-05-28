@@ -11,9 +11,9 @@
 
 
 # Compile
-ChampSim takes 17 parameters: Branch Predictor, L1I Prefetcher, L1D Prefetcher, L2C Prefetcher, LLC Prefetcher, ITLB Prefetcher, DTLB Prefetcher, STLB Prefetcher, BTB Replacement Policy, L1I Replacement Policy, L1D Replacement Policy, L2C Replacement Policy, LLC Replacement Policy, ITLB Replacement Policy, DTLB Replacement Policy, STLB Replacement Policy and the number of cores. For example following command builds single core processor with hashed-perceptron branch predictor,
-no prefetcher for L1I, L1D, L2C, LLC, ITLB, DTLB and STLB,
-LRU replacement policy for BTB, L1I, L1D, L2C, LLC, ITLB, DTLB and STLB.
+ChampSim takes 17 parameters: Branch Predictor, L1I Prefetcher, L1D Prefetcher, L2C Prefetcher, LLC Prefetcher, ITLB Prefetcher, DTLB Prefetcher, STLB Prefetcher, BTB Replacement Policy, L1I Replacement Policy, L1D Replacement Policy, L2C Replacement Policy, LLC Replacement Policy, ITLB Replacement Policy, DTLB Replacement Policy, STLB Replacement Policy and the number of cores. For example following command builds single core processor with hashed-perceptron branch predictor, <br>
+no prefetcher for L1I, L1D, L2C, LLC, ITLB, DTLB and STLB, <br>
+LRU replacement policy for BTB, L1I, L1D, L2C, LLC, ITLB, DTLB and STLB. <br>
 
 ```
 $ ./build_champsim.sh hashed_perceptron no no no no no no no lru lru lru lru lru lru lru lru 1
@@ -63,4 +63,4 @@ Source code for all the replacemnent policy used in our project are available in
 # Evaluate Simulation
 
 ChampSim measures the IPC (Instruction Per Cycle) value as a performance metric. <br>
-We also print cache metrics such as hit rate, miss rate and MPKI which are needed for our project. Other useful metrics are also printed out at the end of simulation. <br>
+We also measure cache metrics such as hit rate, miss rate and MPKI which are needed for our project. Other useful metrics are also printed out at the end of simulation. <br>
