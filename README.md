@@ -29,7 +29,7 @@ $ ./build_champsim.sh hashed_perceptron no no no no no no no lru lru lru opt_lru
 
 ```
 
-# Run simulation
+# Run Simulation
 Execute `run_SMT_1T.sh` for single-thread execution and `run_SMT_2T.sh` for 2-thread SMT execution.
 
 Following command executes previously compiled binary with single thread.
